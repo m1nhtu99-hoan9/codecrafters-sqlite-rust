@@ -1,12 +1,11 @@
 use anyhow::{bail, Context, Result};
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::fs;
 
 mod storage;
-use storage::Page;
+use storage::{Page, DatabaseHeader};
 
 fn main() -> Result<()> {
     // Parse arguments
@@ -23,17 +22,14 @@ fn main() -> Result<()> {
         ".dbinfo" => {
             let path = Path::new(&args[1]);
             let mut file = open_sqlite_file(path)?;
-            let header = read_sqlite_file_header(&mut file, path)?;
-
-            // The page size is stored at the 16th byte offset, using 2 bytes in big-endian order
-            let page_size = u16::from_be_bytes([header[16], header[17]]);
+            let header = DatabaseHeader::read_from_file(&mut file, path)?;
             
-            let master_page = Page::new(&mut file, path)?;
+            let master_page = Page::new(&mut file, path, &header)?;
 
             // You can use print statements as follows for debugging, they'll be visible when running tests.
             eprintln!("Logs from your program will appear here!");
 
-            println!("database page size: {}", page_size);
+            println!("database page size: {}", header.page_size);
             println!("number of tables: {}", master_page.cell_count()?)
         }
         _ => bail!("Missing or invalid command passed: {}", command),
@@ -73,35 +69,3 @@ fn open_sqlite_file(path: &Path) -> Result<File> {
         }
     }
 }
-
-fn read_sqlite_file_header(file: &mut File, path: &Path) -> Result<[u8; 100]> {
-    let mut header = [0; 100];
-    let file_name = path.file_name().unwrap().to_str().unwrap();
-    match file.read_exact(&mut header) {
-        Ok(()) => {
-            // Optional: Validate magic header for exhaustiveness
-            let magic = &header[0..16];
-            if magic != b"SQLite format 3\0" {
-                bail!("Invalid SQLite header magic in file '{}': expected 'SQLite format 3\\0', got {:?}", file_name, magic);
-            }
-            Ok(header)
-        }
-        Err(e) => match e.kind() {
-            ErrorKind::UnexpectedEof => bail!("SQLite file '{}' is too small (less than 100 bytes for header)", file_name),
-            ErrorKind::PermissionDenied => bail!("Permission denied reading header from SQLite file: {}", file_name),
-            ErrorKind::Interrupted => bail!("Read interrupted while fetching SQLite header from: {} (consider retrying)", file_name),
-            ErrorKind::BrokenPipe => bail!("Broken pipe during header read from SQLite file: {}", file_name),
-            ErrorKind::ConnectionAborted => bail!("Connection aborted reading SQLite header: {}", file_name),
-            ErrorKind::ConnectionRefused => bail!("Connection refused reading SQLite header: {}", file_name),
-            ErrorKind::ConnectionReset => bail!("Connection reset reading SQLite header: {}", file_name),
-            ErrorKind::InvalidData => bail!("Invalid data encountered reading SQLite header: {}", file_name),
-            ErrorKind::NotConnected => bail!("Not connected error reading SQLite header: {}", file_name),
-            ErrorKind::TimedOut => bail!("Timeout reading SQLite header from: {}", file_name),
-            ErrorKind::WouldBlock => bail!("Operation would block reading SQLite header: {}", file_name),
-            ErrorKind::WriteZero => bail!("Write zero error (unexpected for read) on SQLite header: {}", file_name),
-            ErrorKind::Other => Err(e).with_context(|| format!("Unknown error reading SQLite header from: {}", file_name)),
-            _ => Err(e).with_context(|| format!("Unexpected error reading SQLite header from: {}", file_name)),
-        }
-    }
-}
-

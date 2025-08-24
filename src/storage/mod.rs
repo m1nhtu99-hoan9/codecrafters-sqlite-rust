@@ -1,2 +1,2 @@
 mod page;
-pub(crate) use page::Page;
+pub use page::{Page, DatabaseHeader};
