@@ -21,7 +21,16 @@ fn main() -> Result<()> {
 
             println!("database page size: {}", sqlite.header.page_size);
             println!("number of tables: {}", sqlite.schema_page.table_count())
-        }
+        },
+        ".tables" => {
+            let sqlite = Sqlite::open_for_read(&args[1])?;
+
+            println!("database page size: {}", sqlite.header.page_size);
+            println!("table names: ");
+            for tbl_name in sqlite.schema_page.table_names()?.iter() {
+                print!("{} ", tbl_name);
+            }
+        },
         _ => bail!("Missing or invalid command passed: {}", command),
     }
 

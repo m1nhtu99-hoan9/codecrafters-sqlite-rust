@@ -5,16 +5,48 @@ use std::{
     path::{Path, PathBuf}
 };
 use crate::{
-    PageZero,
+    SchemaPage,
     paging::Pager,
-    storage::page::DbHeader
 };
+
+const DATABASE_HEADER_SIZE: usize = 100;
+
+/// SQLite database header (first 100 bytes)
+#[derive(Debug, Clone, PartialEq)]
+pub struct DbHeader {
+    pub page_size: u16,
+    header_data: [u8; DATABASE_HEADER_SIZE],
+}
+
+impl DbHeader {
+    pub fn parse_from(header: [u8; DATABASE_HEADER_SIZE], path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let file_name = path.as_ref().file_name().unwrap().to_str().unwrap();
+
+        // Validate magic header
+        let magic = &header[0..16];
+        if magic != b"SQLite format 3\0" {
+            bail!(
+                "Invalid SQLite header magic in file '{}': expected 'SQLite format 3\\0', got {:?}",
+                file_name,
+                magic
+            );
+        }
+
+        // Extract page size from bytes 16-17
+        let page_size = u16::from_be_bytes([header[16], header[17]]);
+
+        Ok(Self {
+            page_size,
+            header_data: header,
+        })
+    }
+}
 
 pub struct Sqlite<F> {
     pub pager: Pager<F>,
     pub file_path: PathBuf,
     pub header: DbHeader,
-    pub schema_page: PageZero
+    pub schema_page: SchemaPage
 }
 
 impl <F> Sqlite<F> {
@@ -84,7 +116,7 @@ impl Sqlite<File> {
                 let mut page_zero_data = vec![0; page_size];
                 match pager.input.read_exact(&mut page_zero_data) {
                     Ok(()) => {
-                        let page_zero = PageZero::init(page_zero_data)?;
+                        let page_zero = SchemaPage::init(page_zero_data)?;
                         
                         Ok(Self {
                             pager,

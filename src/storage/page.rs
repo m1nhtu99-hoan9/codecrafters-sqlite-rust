@@ -1,56 +1,27 @@
-use crate::storage::btree::{BTreePageHeader, PageType};
+use crate::storage::btree::{BTreePageHeader, LeafTableCell, PageType, SchemaMasterRecord};
 use anyhow::{bail, Result};
-use std::path::Path;
-
-const DATABASE_HEADER_SIZE: usize = 100;
-
-/// SQLite database header (first 100 bytes)
-#[derive(Debug, Clone, PartialEq)]
-pub struct DbHeader {
-    pub page_size: u16,
-    header_data: [u8; DATABASE_HEADER_SIZE],
-}
-
-impl DbHeader {
-    pub fn parse_from(header: [u8; DATABASE_HEADER_SIZE], path: impl AsRef<Path>) -> Result<Self> {
-        let file_name = path.as_ref().file_name().unwrap().to_str().unwrap();
-
-        // Validate magic header
-        let magic = &header[0..16];
-        if magic != b"SQLite format 3\0" {
-            bail!(
-                "Invalid SQLite header magic in file '{}': expected 'SQLite format 3\\0', got {:?}",
-                file_name,
-                magic
-            );
-        }
-
-        // Extract page size from bytes 16-17
-        let page_size = u16::from_be_bytes([header[16], header[17]]);
-
-        Ok(Self {
-            page_size,
-            header_data: header,
-        })
-    }
-}
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PageZero {
+pub struct SchemaPage {
     first_freeblock: u16,
     cell_count: u16,
     cell_content_start: u16,
     fragmented_bytes: u8,
     cell_pointers: Vec<u16>,
+    buffer: Vec<u8>,
 }
 
-impl PageZero {
+impl SchemaPage {
     pub fn init(buffer: Vec<u8>) -> Result<Self> {
         let header = BTreePageHeader::parse(&buffer)?;
-        
+
         // Assert this is a leaf table page (sqlite_schema table must be leaf table)
         if !matches!(header.page_type, PageType::LeafTable) {
-            bail!("Page zero must be a leaf table page (sqlite_schema), found {:?}", header.page_type);
+            bail!(
+                "Page zero must be a leaf table page (sqlite_schema), found {:?}",
+                header.page_type
+            );
         }
 
         // Assert no rightmost pointer for leaf pages
@@ -61,7 +32,11 @@ impl PageZero {
         // Assert reasonable cell content start (should be > header size + cell pointer array)
         let min_content_start = 8 + (header.cell_count as usize * 2); // header + cell pointers
         if (header.cell_content_start as usize) < min_content_start {
-            bail!("Invalid cell content start: {} < {}", header.cell_content_start, min_content_start);
+            bail!(
+                "Invalid cell content start: {} < {}",
+                header.cell_content_start,
+                min_content_start
+            );
         }
 
         Ok(Self {
@@ -70,6 +45,7 @@ impl PageZero {
             cell_content_start: header.cell_content_start,
             fragmented_bytes: header.fragmented_bytes,
             cell_pointers: header.cell_pointers,
+            buffer,
         })
     }
 
@@ -79,6 +55,25 @@ impl PageZero {
 
     pub fn cells(&self) -> impl Iterator<Item = u16> + '_ {
         self.cell_pointers.iter().copied()
+    }
+
+    /// Extract table names from sqlite_schema
+    pub fn table_names(&self) -> Result<Rc<[String]>> {
+        let mut table_names = Vec::new();
+
+        for cell_offset in self.cells() {
+            // Cell offsets are relative to page start, but our buffer excludes the 100-byte DB header
+            let adjusted_offset = (cell_offset as usize).saturating_sub(100);
+            let cell = LeafTableCell::parse(&self.buffer, adjusted_offset as u16)?;
+            let schema_record = SchemaMasterRecord::from_cell(&self.buffer, &cell)?;
+
+            // Only collect actual tables (not indexes, views, etc.)
+            if schema_record.type_ == "table" {
+                table_names.push(schema_record.name);
+            }
+        }
+
+        Ok(table_names.into())
     }
 }
 

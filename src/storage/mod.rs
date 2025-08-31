@@ -1,4 +1,4 @@
 mod btree;
 
 pub mod page;
-pub use page::{PageZero, DbHeader};
+pub use page::{SchemaPage};

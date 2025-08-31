@@ -44,7 +44,7 @@ Before providing implementation guidance, assess both understanding AND scope:
 When the student shows signs of scope creep or over-engineering:
 
 - **Reality Check**: "This is fascinating database theory, but will it help pass the next test?"
-- **Milestone Refocus**: "Let's park this optimization idea and tackle it after we get basic SELECT working"
+- **Milestone Refocus**: "Let's park this optimisation idea and tackle it after we get basic SELECT working"
 - **Progress Assessment**: "We've been on this abstraction for 2 hours - what's the simplest version that works?"
 - **Technical Debt Triage**: "Note this for later improvement, but let's get the happy path working first"
 
@@ -77,15 +77,15 @@ When the student shows signs of scope creep or over-engineering:
 - Direct, practical guidance
 - "Good enough" solutions
 - Minimal viable implementations
-- Defer optimizations
+- Defer optimisations
 
 ### Project Management Interventions
-Recognize and respond to these patterns:
+Recognise and respond to these patterns:
 
 **Over-Engineering Signals**:
 - Designing for hypothetical future requirements
 - Multiple abstraction layers for simple operations
-- Premature optimization discussions
+- Premature optimisation discussions
 - Analysis paralysis on design decisions
 
 **Response**: "This is great thinking for production code, but let's solve today's test first. Can we start with a simpler version?"
@@ -126,7 +126,7 @@ Keep entries fun, personal, and engaging while maintaining project momentum:
 - **"Test-driven scope definition"**
 - **"Perfect is the enemy of done"**
 - **"Note it, park it, ship it"**
-- **"Simple, correct, then optimize"**
+- **"Simple, correct, then optimise"**
 
 This establishes you as both a rigorous technical mentor AND a pragmatic project guide who ensures learning happens without sacrificing progress. You'll balance deep database systems education with practical delivery constraints, always keeping one eye on the immediate challenge requirements.
 
@@ -158,7 +158,7 @@ The Pager becomes the natural home for B-tree traversal logic, page loading, and
 - **Page**: Parses raw bytes into SQLite page format (header + cells)
 - **BTree**: Operates on parsed Pages to traverse and extract records
 
-The missing piece was recognizing that BTree logic operates on Page structures, not raw file bytes. This creates clean abstraction boundaries where each component has a single responsibility.
+The missing piece was recognising that BTree logic operates on Page structures, not raw file bytes. This creates clean abstraction boundaries where each component has a single responsibility.
 
 **Project Management Insight**: This represents the moment when individual components clicked into a coherent system design. The student naturally progressed from "what components do I need?" to "how do they work together?" - exactly the right progression for building complex systems incrementally.
 
@@ -195,7 +195,7 @@ match db.reader().read_exact()        // ✅ db still intact for borrowing
 **The Learning**: Coming from C# where the GC handles object lifetimes automatically, this ownership dance feels foreign. But Rust's "borrow checker as design tool" actually prevents the subtle bugs where you accidentally use stale references after an object has been modified elsewhere. The fix isn't just about satisfying the compiler - it's about designing cleaner APIs that make ownership intent explicit.
 
 ### 2025-08-31: The PageZero Smart Interpreter Refactor
-**The Problem**: The user realized that having PageZero hold onto raw `Vec<u8>` content was a "terrible idea" from an ownership perspective. The struct was just a dumb container when it should be a smart interpreter of SQLite B-tree page metadata.
+**The Problem**: The user realised that having PageZero hold onto raw `Vec<u8>` content was a "terrible idea" from an ownership perspective. The struct was just a dumb container when it should be a smart interpreter of SQLite B-tree page metadata.
 
 **The Realisation**: "It's a terrible idea letting PageZero holding onto content of `Vec[u8]`. Its job will now become a smarter interpreter: `init` will accept the buffer and return the actual interpretation."
 
@@ -241,9 +241,62 @@ impl PageZero {
 - **`btree.rs`**: B-tree semantics - node types, parsing logic, tree operations
 
 **The Clean Result**: 
-- `PageType::from_byte()` centralizes all magic byte interpretation in one place
+- `PageType::from_byte()` centralises all magic byte interpretation in one place
 - Both `BTreePageHeader::parse()` and `BTreePage::parse()` call the same method
 - Zero duplication, single source of truth for SQLite B-tree node type logic
 - Proper dependency flow: page layer (physical) ← btree layer (logical)
 
 **Project Management Insight**: The user correctly identified that scattered duplication indicated unclear module boundaries. The fix wasn't just eliminating code duplication - it was clarifying which layer owns which concepts. In domain-driven design terms, B-tree node types are part of the "B-tree bounded context", not the "raw storage bounded context".
+
+### 2025-08-31: Scope Boundary - Cell Payload Overflow Out of Scope
+**The Constraint**: From the CodeCrafters problem description: "If a cell's payload is too large to fit on a single page, the remainder of the payload will be stored on cell payload overflow pages. You do not need to handle payload overflow in this challenge."
+
+**The Scope Decision**: Cell payload overflow pages are explicitly out of scope for this challenge. All record parsing can assume that cell payloads fit entirely within a single page. This eliminates the complexity of following overflow page chains and allows for a simpler record parser implementation.
+
+**Project Management Insight**: This is a perfect example of test-driven scope definition. The challenge explicitly states what's not required, so we can build a focused solution that passes the current requirements without over-engineering for edge cases we don't need to handle yet.
+
+### 2025-08-31: Generic vs Hardcoded - The SQLite Schema Parser Design Choice
+**The Question**: "Does SQLite implementation in C (the original one) hardcode the sqlite_schema layout? I don't think so, because the implementation should be resilient to deal with multiple sqlite versions?"
+
+**The Research Insight**: The student correctly intuited that SQLite does NOT hardcode the schema table layout. The original implementation uses a generic record parser for version resilience - the sqlite_schema table schema has evolved over time, and SQLite must read databases from older versions.
+
+**The Architecture Decision**: Instead of hardcoding sqlite_schema parsing for a quick win, we built a comprehensive generic record parser with:
+- **Varint reading infrastructure** for variable-length encoding
+- **ColumnType system** covering all SQLite serial types
+- **RecordHeader parser** that self-describes column count and types
+- **LeafTableCell** for generic table record extraction
+- **SchemaRecord** as a typed wrapper over the generic parser
+
+**The Implementation Benefit**: This generic approach eliminates "boring manual buffer interpretation" through proper abstractions while staying true to how real SQLite works. The parser can handle any table schema, not just sqlite_schema, setting up the foundation for user-defined table queries later.
+
+**Project Management Insight**: Sometimes the "longer" path (generic implementation) actually reduces technical debt and future complexity. The student's architectural instinct to question hardcoding led to a more robust solution that's both educational and extensible. This demonstrates mature system thinking - considering not just immediate requirements but the broader design implications.
+
+### 2025-08-31: The Cell Pointer Mystery - When ASCII Meets Binary Parsing
+**The Problem**: Runtime bug where `RecordHeader::parse` was called with impossible values: `header_end=4096` while `header_size=111` and `record_start=3985`. The calculation `3985 + 111 = 4096` would extend beyond the page boundary.
+
+**The Investigation Trail**: Through systematic debugging, the issue traced back through the call chain:
+1. `SchemaPage::table_names()` → iterates cell pointers `[3846, 3764, 3661]`
+2. `LeafTableCell::parse()` → parses varints at cell offset `3846`
+3. `RecordHeader::parse()` → tries to parse header at calculated offset `3848`
+
+**The Breakthrough**: At offset `3848`, the bytes were `[65, 20, 74, 65, 78, 74, 2c, 20, 64, 6f]` - but these are ASCII characters spelling "ame table"! The parser was reading SQL text as if it were binary varint data:
+- `0x65` (101) interpreted as header size
+- `0x20` (' ') interpreted as part of record structure
+- `0x74` ('t') treated as column type data
+
+**The Root Cause Discovery**: The cell pointers `[3846, 3764, 3661]` were being parsed correctly from the B-tree page header, but the fundamental issue was **SQLite page 0 structure misunderstanding**:
+
+- **Page 0 Layout**: First 100 bytes = database header, followed by B-tree page data
+- **Cell Pointer Semantics**: Cell pointers are absolute offsets from the beginning of the entire page (including the 100-byte database header)
+- **Buffer Content**: Our buffer only contained the B-tree page data (excluding the database header)
+- **Offset Mismatch**: Using cell pointer `3846` directly on a buffer that started at byte 100 of the page
+
+**The Fix**: Adjust cell offsets to account for the missing database header:
+```rust
+// Cell offsets are relative to page start, but our buffer excludes the 100-byte DB header
+let adjusted_offset = (cell_offset as usize).saturating_sub(100);
+```
+
+**The Learning**: This demonstrated the critical importance of understanding **data layout assumptions** in binary file formats. SQLite's page structure has two distinct regions with different addressing schemes. The debugging approach of tracing data flow revealed that the parsing logic was correct, but the addressing was off by exactly 100 bytes - a classic off-by-offset bug.
+
+**Project Management Insight**: Systematic debugging with targeted logging at each parsing layer quickly isolated the problem to offset calculation rather than parsing logic. The "impossible" runtime values (ASCII interpreted as binary) were the perfect clue - they indicated we were reading from the wrong memory location entirely. Sometimes the most confusing symptoms point to the simplest architectural misunderstandings.
