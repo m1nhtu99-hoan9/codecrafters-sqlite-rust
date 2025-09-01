@@ -1,9 +1,11 @@
 use crate::storage::btree::{BTreePageHeader, LeafTableCell, PageType, SchemaMasterRecord};
-use anyhow::{bail, Result};
+use anyhow::{bail};
 use std::rc::Rc;
+use crate::DATABASE_HEADER_SIZE;
 
+/// The `sqlite_schema` page
 #[derive(Debug, Clone, PartialEq)]
-pub struct SchemaPage {
+pub struct RootPage {
     first_freeblock: u16,
     cell_count: u16,
     cell_content_start: u16,
@@ -12,8 +14,8 @@ pub struct SchemaPage {
     buffer: Vec<u8>,
 }
 
-impl SchemaPage {
-    pub fn init(buffer: Vec<u8>) -> Result<Self> {
+impl RootPage {
+    pub fn init(buffer: Vec<u8>) -> anyhow::Result<Self> {
         let header = BTreePageHeader::parse(&buffer)?;
 
         // Assert this is a leaf table page (sqlite_schema table must be leaf table)
@@ -39,41 +41,60 @@ impl SchemaPage {
             );
         }
 
+        // Adjust all cell pointers at construction time since our buffer excludes the 100-byte DB header
+        let adjusted_cell_pointers: Vec<u16> = header.cell_pointers
+            .into_iter()
+            .map(|offset| offset.saturating_sub(DATABASE_HEADER_SIZE as u16))
+            .collect();
+
         Ok(Self {
             first_freeblock: header.first_freeblock,
             cell_count: header.cell_count,
             cell_content_start: header.cell_content_start,
             fragmented_bytes: header.fragmented_bytes,
-            cell_pointers: header.cell_pointers,
+            cell_pointers: adjusted_cell_pointers,
             buffer,
         })
     }
 
+    #[inline]
     pub fn table_count(&self) -> u16 {
         self.cell_count
     }
 
+    #[inline]
     pub fn cells(&self) -> impl Iterator<Item = u16> + '_ {
         self.cell_pointers.iter().copied()
     }
 
     /// Extract table names from sqlite_schema
-    pub fn table_names(&self) -> Result<Rc<[String]>> {
-        let mut table_names = Vec::new();
+    pub fn table_names(&self) -> anyhow::Result<Rc<[String]>> {
+        self.cells()
+            .map(|cell_offset| -> anyhow::Result<Option<String>> {
+                let cell = LeafTableCell::parse(&self.buffer, cell_offset)?;
+                let schema_record = SchemaMasterRecord::from_cell(&self.buffer, &cell)?;
+                if schema_record.type_ == "table" {
+                    Ok(Some(schema_record.name))
+                } else {
+                    Ok(None)
+                }
+            })
+            .filter_map(|result| result.transpose())
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(|names| names.into())
+    }
 
+    /// Find a specific table's schema record by name
+    pub fn find_table(&self, table_name: &str) -> anyhow::Result<Option<SchemaMasterRecord>> {
         for cell_offset in self.cells() {
-            // Cell offsets are relative to page start, but our buffer excludes the 100-byte DB header
-            let adjusted_offset = (cell_offset as usize).saturating_sub(100);
-            let cell = LeafTableCell::parse(&self.buffer, adjusted_offset as u16)?;
+            let cell = LeafTableCell::parse(&self.buffer, cell_offset)?;
             let schema_record = SchemaMasterRecord::from_cell(&self.buffer, &cell)?;
-
-            // Only collect actual tables (not indexes, views, etc.)
-            if schema_record.type_ == "table" {
-                table_names.push(schema_record.name);
+            
+            if schema_record.type_ == "table" && schema_record.name == table_name {
+                return Ok(Some(schema_record));
             }
         }
-
-        Ok(table_names.into())
+        Ok(None)
     }
 }
 
@@ -119,13 +140,14 @@ pub struct InteriorTablePage {
 }
 
 impl LeafIndexPage {
-    pub fn parse(_buffer: &[u8]) -> Result<Self> {
+    #[allow(unused)]
+    pub fn parse(_buffer: &[u8]) -> anyhow::Result<Self> {
         todo!()
     }
 }
 
 impl LeafTablePage {
-    pub fn parse(buffer: &[u8]) -> Result<Self> {
+    pub fn parse(buffer: &[u8]) -> anyhow::Result<Self> {
         let header = BTreePageHeader::parse(buffer)?;
 
         // Validate that this is actually a leaf table page
@@ -144,13 +166,15 @@ impl LeafTablePage {
 }
 
 impl InteriorIndexPage {
-    pub fn parse(_buffer: &[u8]) -> Result<Self> {
+    #[allow(unused)]
+    pub fn parse(_buffer: &[u8]) -> anyhow::Result<Self> {
         todo!()
     }
 }
 
 impl InteriorTablePage {
-    pub fn parse(_buffer: &[u8]) -> Result<Self> {
+    #[allow(unused)]
+    pub fn parse(_buffer: &[u8]) -> anyhow::Result<Self> {
         todo!()
     }
 }

@@ -1,4 +1,4 @@
 mod btree;
 
 pub mod page;
-pub use page::{SchemaPage};
+pub use page::{RootPage};

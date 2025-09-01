@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use codecrafters_sqlite::Sqlite;
+use codecrafters_sqlite::{Sqlite, sql::SqlQuery};
 
 fn main() -> Result<()> {
     // Parse arguments
@@ -30,6 +30,12 @@ fn main() -> Result<()> {
             for tbl_name in sqlite.schema_page.table_names()?.iter() {
                 print!("{} ", tbl_name);
             }
+        },
+        query if query.to_uppercase().starts_with("SELECT") => {
+            let mut sqlite = Sqlite::open_for_read(&args[1])?;
+            let parsed_query = SqlQuery::parse(query)?;
+            let result = sqlite.execute_query(&parsed_query)?;
+            println!("{}", result);
         },
         _ => bail!("Missing or invalid command passed: {}", command),
     }

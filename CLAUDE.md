@@ -300,3 +300,45 @@ let adjusted_offset = (cell_offset as usize).saturating_sub(100);
 **The Learning**: This demonstrated the critical importance of understanding **data layout assumptions** in binary file formats. SQLite's page structure has two distinct regions with different addressing schemes. The debugging approach of tracing data flow revealed that the parsing logic was correct, but the addressing was off by exactly 100 bytes - a classic off-by-offset bug.
 
 **Project Management Insight**: Systematic debugging with targeted logging at each parsing layer quickly isolated the problem to offset calculation rather than parsing logic. The "impossible" runtime values (ASCII interpreted as binary) were the perfect clue - they indicated we were reading from the wrong memory location entirely. Sometimes the most confusing symptoms point to the simplest architectural misunderstandings.
+
+### 2025-09-01: The Pager Physical vs Logical Layer Separation Breakthrough
+**The Problem**: The user was skeptical about the pager implementation, questioning whether page 1 should seek to byte 100 (database header size) instead of byte 0, and whether rootpage values mapped correctly to file offsets.
+
+**The Investigation**: Looking at the pager code in `src/pager.rs:46-67`, the user identified a critical flaw in the offset calculation:
+```rust
+let file_offset = if page_number.value() == 1 {
+    DATABASE_HEADER_SIZE  // 100 - WRONG!
+} else {
+    (page_number.value() - 1) * (self.page_size as u64)
+};
+```
+
+**The Realisation**: "oh maybe that's why we let the pager flushing to a buf array, instead of returning the materialised / parsed pages. we want the pager to focus only on the physical data operations, not the logical ones"
+
+**The Architecture Insight**: The user correctly identified that the buffer-based design was actually brilliant in its separation of concerns:
+
+**Pager (Physical Layer)**:
+- Raw file I/O operations  
+- Page-sized buffer management
+- File offset calculations
+- Zero knowledge of SQLite page structure
+
+**Page Parser (Logical Layer)**:
+- Interprets raw bytes as SQLite page types
+- Handles database header vs page data distinction  
+- Understands B-tree node formats
+- Extracts meaningful records
+
+**The Fix**: Simplify the pager to always use page boundaries:
+```rust
+let file_offset = (page_number.value() - 1) * (self.page_size as u64);
+```
+
+This lets page parsers decide how to handle the data:
+- `DbHeader::parse(&buf[0..100])` - read header from page 1
+- `RootPage::parse(&buf[100..])` - skip header, parse B-tree data  
+- `LeafTablePage::parse(&buf)` - parse entire page 2+ as B-tree
+
+**The Learning**: The user discovered that mixing physical I/O concerns with logical parsing concerns would make the pager much more complex and less reusable. The buffer-based approach provides flexibility while maintaining clean architectural boundaries.
+
+**Project Management Insight**: This represents mature architectural thinking - recognising that the "obvious" special case (page 1 handling) was actually breaking a fundamental design principle. The user's skepticism led to identifying and fixing a bug that would have broken table queries, while also appreciating the elegant separation of concerns in the existing design.

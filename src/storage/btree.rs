@@ -1,7 +1,8 @@
 use crate::storage::page::{InteriorIndexPage, InteriorTablePage, LeafIndexPage, LeafTablePage};
 use anyhow::bail;
+use std::rc::Rc;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum ColumnType {
     Null,
     Integer { size: i64 },
@@ -51,7 +52,7 @@ impl ColumnType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordHeader {
-    pub column_types: Vec<ColumnType>,
+    column_types: Vec<ColumnType>,
     pub data_start_offset: usize,
 }
 
@@ -77,6 +78,11 @@ impl RecordHeader {
             column_types,
             data_start_offset: header_end,
         })
+    }
+
+    #[allow(unused)]
+    pub fn column_types(&self) -> Rc<[ColumnType]> {
+        self.column_types.iter().copied().collect::<Vec<_>>().into()
     }
 
     pub fn column_count(&self) -> usize {
@@ -194,10 +200,12 @@ impl BTreePage {
         }
     }
 
+    #[inline]
     pub fn is_leaf(&self) -> bool {
         matches!(self, Self::LeafIndex(_) | Self::LeafTable(_))
     }
 
+    #[inline]
     pub fn is_table_page(&self) -> bool {
         matches!(self, Self::LeafTable(_) | Self::InteriorTable(_))
     }

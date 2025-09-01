@@ -5,21 +5,22 @@ use std::{
     path::{Path, PathBuf}
 };
 use crate::{
-    SchemaPage,
-    paging::Pager,
+    RootPage,
+    pager::{Pager, PageNumber},
+    storage::page::LeafTablePage,
+    sql::SqlQuery,
+    DATABASE_HEADER_SIZE,
 };
-
-const DATABASE_HEADER_SIZE: usize = 100;
 
 /// SQLite database header (first 100 bytes)
 #[derive(Debug, Clone, PartialEq)]
 pub struct DbHeader {
     pub page_size: u16,
-    header_data: [u8; DATABASE_HEADER_SIZE],
+    header_data: [u8; DATABASE_HEADER_SIZE as usize],
 }
 
 impl DbHeader {
-    pub fn parse_from(header: [u8; DATABASE_HEADER_SIZE], path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn parse_from(header: [u8; DATABASE_HEADER_SIZE as usize], path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let file_name = path.as_ref().file_name().unwrap().to_str().unwrap();
 
         // Validate magic header
@@ -46,15 +47,45 @@ pub struct Sqlite<F> {
     pub pager: Pager<F>,
     pub file_path: PathBuf,
     pub header: DbHeader,
-    pub schema_page: SchemaPage
+    pub schema_page: RootPage
 }
 
-impl <F> Sqlite<F> {
-   pub fn file_name(&self) -> String {
-       self.file_path.file_name().unwrap().to_str().unwrap().to_string()
+impl<F> Sqlite<F> {
+    #[inline]
+    pub fn file_name(&self) -> String {
+        self.file_path.file_name().unwrap().to_str().unwrap().to_string()
+    }
+}
+
+impl<F: Seek + Read> Sqlite<F> {
+   /// Load a table's root page by page number
+   pub fn load_table_page(&mut self, page_number: u64) -> anyhow::Result<LeafTablePage> {
+       let page_num = PageNumber::new(page_number)
+           .map_err(|e| anyhow::anyhow!("Invalid page number {}: {}", page_number, e))?;
+       
+       let mut page_buffer = vec![0u8; self.header.page_size as usize];
+       self.pager.read(page_num, &mut page_buffer)?;
+       
+       LeafTablePage::parse(&page_buffer)
+   }
+
+   /// Execute a SQL query
+   pub fn execute_query(&mut self, query: &SqlQuery) -> anyhow::Result<String> {
+       match query {
+           SqlQuery::SelectCount { table_name } => {
+               // Find the table in the schema
+               let schema_record = self.schema_page.find_table(table_name)?
+                   .ok_or_else(|| anyhow::anyhow!("Table '{}' not found", table_name))?;
+               
+               // Load the table's root page
+               let table_page = self.load_table_page(schema_record.rootpage as u64)?;
+               
+               // Return the count directly from the page header
+               Ok(table_page.cell_count.to_string())
+           }
+       }
    }
 }
-
 
 impl Sqlite<File> {
     /// Open the file with exhaustive handling (for educational purpose)
@@ -107,22 +138,22 @@ impl Sqlite<File> {
         match file.read_exact(&mut header_buf) {
             Ok(()) => {
                 let header = DbHeader::parse_from(header_buf, &abs_path)?;
-                let mut pager = Pager::new(file, header.page_size as usize);
-                
+
                 // Skip the 100-byte header to read page zero
-                pager.input.seek(SeekFrom::Start(100))?;
-                
+                file.seek(SeekFrom::Start(DATABASE_HEADER_SIZE))?;
+
                 let page_size = header.page_size as usize;
+
                 let mut page_zero_data = vec![0; page_size];
-                match pager.input.read_exact(&mut page_zero_data) {
+                match file.read_exact(&mut page_zero_data) {
                     Ok(()) => {
-                        let page_zero = SchemaPage::init(page_zero_data)?;
+                        let root_page = RootPage::init(page_zero_data)?;
                         
                         Ok(Self {
-                            pager,
+                            pager: Pager::new(file, page_size),
                             file_path: abs_path,
                             header,
-                            schema_page: page_zero,
+                            schema_page: root_page,
                         })
                     }
                     Err(e) => match e.kind() {
