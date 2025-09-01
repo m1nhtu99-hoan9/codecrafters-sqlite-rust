@@ -1,5 +1,4 @@
 use std::io::{Read, Seek, SeekFrom};
-use crate::DATABASE_HEADER_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PageNumber(u64);

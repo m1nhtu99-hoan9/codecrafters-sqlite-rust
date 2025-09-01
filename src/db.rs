@@ -1,15 +1,14 @@
+use crate::{
+    pager::{PageNumber, Pager},
+    storage::BTreePage,
+    RootPage,
+    DATABASE_HEADER_SIZE
+};
 use anyhow::{bail, Context};
 use std::{
     fs::File,
     io::{ErrorKind, Read, Seek, SeekFrom},
     path::{Path, PathBuf}
-};
-use crate::{
-    RootPage,
-    pager::{Pager, PageNumber},
-    storage::page::LeafTablePage,
-    sql::SqlQuery,
-    DATABASE_HEADER_SIZE,
 };
 
 /// SQLite database header (first 100 bytes)
@@ -59,31 +58,14 @@ impl<F> Sqlite<F> {
 
 impl<F: Seek + Read> Sqlite<F> {
    /// Load a table's root page by page number
-   pub fn load_table_page(&mut self, page_number: u64) -> anyhow::Result<LeafTablePage> {
+   pub fn load_page(&mut self, page_number: u64) -> anyhow::Result<BTreePage> {
        let page_num = PageNumber::new(page_number)
            .map_err(|e| anyhow::anyhow!("Invalid page number {}: {}", page_number, e))?;
        
        let mut page_buffer = vec![0u8; self.header.page_size as usize];
        self.pager.read(page_num, &mut page_buffer)?;
        
-       LeafTablePage::parse(&page_buffer)
-   }
-
-   /// Execute a SQL query
-   pub fn execute_query(&mut self, query: &SqlQuery) -> anyhow::Result<String> {
-       match query {
-           SqlQuery::SelectCount { table_name } => {
-               // Find the table in the schema
-               let schema_record = self.schema_page.find_table(table_name)?
-                   .ok_or_else(|| anyhow::anyhow!("Table '{}' not found", table_name))?;
-               
-               // Load the table's root page
-               let table_page = self.load_table_page(schema_record.rootpage as u64)?;
-               
-               // Return the count directly from the page header
-               Ok(table_page.cell_count.to_string())
-           }
-       }
+       BTreePage::parse(&page_buffer)
    }
 }
 
