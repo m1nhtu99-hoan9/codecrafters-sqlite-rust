@@ -11,6 +11,8 @@ The student is an expert C# and TypeScript developer transitioning to Rust. When
 - Async patterns (Task/Promise vs Future)
 - Pattern matching and algebraic data types
 
+**Language Convention**: Use Australian English spelling forms throughout all documentation and code comments (-ise over -ize, -our over -or, etc.).
+
 ## Dual Expertise
 
 ### Technical Mastery
@@ -342,3 +344,47 @@ This lets page parsers decide how to handle the data:
 **The Learning**: The user discovered that mixing physical I/O concerns with logical parsing concerns would make the pager much more complex and less reusable. The buffer-based approach provides flexibility while maintaining clean architectural boundaries.
 
 **Project Management Insight**: This represents mature architectural thinking - recognising that the "obvious" special case (page 1 handling) was actually breaking a fundamental design principle. The user's skepticism led to identifying and fixing a bug that would have broken table queries, while also appreciating the elegant separation of concerns in the existing design.
+
+### 2025-09-06: Rust Design Mindset - Parameterised Lifetimes and Idiomatic Architecture
+**The Question**: "If it's a borrow/move, why not designing QueryExecutor<'a> in a ways of containing only methods accepting `'a` as param input? moving a param is way easier than moving a struct field?"
+
+**The Architectural Insight**: The student discovered that **parameterised lifetimes are superior to struct field lifetimes** for flexible API design. Instead of rigid struct-bound lifetimes, method-scoped lifetimes provide maximum flexibility with minimum complexity.
+
+**The Pattern Discovery**:
+```rust
+// Inflexible: Struct lifetime creates rigid constraints
+struct QueryExecutor<'a> {
+    database: &'a mut Database,  // Struct tied to database lifetime
+}
+
+// Flexible: Parameter lifetimes are independent per method call  
+struct QueryExecutor;
+impl QueryExecutor {
+    fn execute<'a>(&self, database: &'a mut Database) -> Result<T> {
+        // Each method call gets fresh lifetime scope
+    }
+}
+```
+
+**The Meta-Learning**: This breakthrough revealed **8 core Rust design principles**:
+
+1. **"Prefer Parameters Over Fields"**: Move data where it's needed, when it's needed, rather than holding onto it
+2. **"Ownership as API Design"**: Rust forces you to think about whether structs *own* data or just *use* it occasionally
+3. **"Zero-Cost Abstractions Through Lifetime Discipline"**: Parameterised lifetimes disappear at compile time while providing maximum flexibility
+4. **"Design for the Borrow Checker, Not Against It"**: Borrow checker errors indicate architectural improvements, not syntax problems
+5. **"Prefer Explicit Over Implicit"**: Ownership intent, mutation requirements, and error handling are visible in signatures
+6. **"Types as Documentation"**: The type signature IS the documentation - anyone reading it understands the contract immediately
+7. **"Performance Through Constraint"**: The constraints that make code correct also make it fast
+8. **"Functional Core, Imperative Shell"**: Borrow checker naturally separates pure computation from stateful operations
+
+**The Architecture Evolution**: From "how do I store this reference?" to "how do I pass this data when needed?" represents the **core mindset shift** that makes developers productive in Rust.
+
+**The Key Realisation**: In Rust, **good performance and good architecture are the same thing**. The borrow checker guides toward designs that are simultaneously:
+- Memory safe
+- Thread safe  
+- Zero-cost
+- Compositionally elegant
+
+This is fundamentally different from languages where safety and performance are often in tension. Rust's genius is making them **mutually reinforcing**.
+
+**Project Management Insight**: The student's architectural instinct about lifetime flexibility led to discovering that Rust's design philosophy - "Make the right thing easy and the wrong thing hard" - naturally guides toward patterns that are both educationally valuable and practically superior. This represents mature system thinking where language constraints become architectural strengths.

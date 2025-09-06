@@ -1,4 +1,7 @@
-use crate::storage::page::{InteriorIndexPage, InteriorTablePage, LeafIndexPage, LeafTablePage};
+use crate::{
+    schema::parser::ColumnDefinition,
+    storage::page::{InteriorIndexPage, InteriorTablePage, LeafIndexPage, LeafTablePage}
+};
 use anyhow::bail;
 use std::rc::Rc;
 
@@ -245,8 +248,34 @@ impl LeafTableCell {
         Ok(LeafTableCell { record_header })
     }
 
-    /// Extract column data as raw bytes for a specific column index
-    pub fn column_data<'a>(&self, buffer: &'a [u8], column_index: usize) -> anyhow::Result<&'a [u8]> {
+    /// Extract column data as raw bytes for a specific column definition
+    pub fn column_data<'a>(&self, buffer: &'a [u8], column: &ColumnDefinition) -> anyhow::Result<&'a [u8]> {
+        let column_index = column.position;
+        
+        if column_index >= self.record_header.column_types.len() {
+            bail!("Column '{}' position {} out of bounds", column.name, column_index);
+        }
+
+        let mut data_offset = self.record_header.data_start_offset;
+
+        // Skip over previous columns to find our target column
+        for i in 0..column_index {
+            let column_type = &self.record_header.column_types[i];
+            data_offset += column_type.data_size();
+        }
+
+        let target_type = &self.record_header.column_types[column_index];
+        let data_size = target_type.data_size();
+
+        if data_offset + data_size > buffer.len() {
+            bail!("Column '{}' data extends beyond buffer", column.name);
+        }
+
+        Ok(&buffer[data_offset..data_offset + data_size])
+    }
+
+    /// Extract column data as raw bytes for a specific column index (system tables only)
+    pub fn column_data_by_index<'a>(&self, buffer: &'a [u8], column_index: usize) -> anyhow::Result<&'a [u8]> {
         if column_index >= self.record_header.column_types.len() {
             bail!("Column index {} out of bounds", column_index);
         }
@@ -270,12 +299,25 @@ impl LeafTableCell {
     }
 
     /// Extract TEXT column as String
-    pub fn text_column(&self, buffer: &[u8], column_index: usize) -> anyhow::Result<String> {
+    pub fn text_column(&self, buffer: &[u8], column: &ColumnDefinition) -> anyhow::Result<String> {
+        let column_type = &self.record_header.column_types[column.position];
+
+        match column_type {
+            ColumnType::Text { length: _ } => {
+                let data = self.column_data(buffer, column)?;
+                Ok(String::from_utf8(data.to_vec())?)
+            }
+            _ => bail!("Column '{}' is not TEXT type", column.name),
+        }
+    }
+
+    /// Extract TEXT column as String by index (system tables only)
+    pub fn text_column_by_index(&self, buffer: &[u8], column_index: usize) -> anyhow::Result<String> {
         let column_type = &self.record_header.column_types[column_index];
 
         match column_type {
             ColumnType::Text { length: _ } => {
-                let data = self.column_data(buffer, column_index)?;
+                let data = self.column_data_by_index(buffer, column_index)?;
                 Ok(String::from_utf8(data.to_vec())?)
             }
             _ => bail!("Column {} is not TEXT type", column_index),
@@ -302,14 +344,14 @@ impl SchemaMasterRecord {
             );
         }
 
-        let type_ = cell.text_column(buffer, 0)?;
-        let name = cell.text_column(buffer, 1)?;
-        let tbl_name = cell.text_column(buffer, 2)?;
+        let type_ = cell.text_column_by_index(buffer, 0)?;
+        let name = cell.text_column_by_index(buffer, 1)?;
+        let tbl_name = cell.text_column_by_index(buffer, 2)?;
 
         // rootpage is an integer - we need to handle different integer sizes
         let rootpage = match &cell.record_header.column_types[3] {
             ColumnType::Integer { size } => {
-                let data = cell.column_data(buffer, 3)?;
+                let data = cell.column_data_by_index(buffer, 3)?;
                 match size {
                     0 => 0, // constant 0
                     1 => data[0] as i8 as i64,
@@ -346,7 +388,7 @@ impl SchemaMasterRecord {
             _ => bail!("Expected rootpage to be INTEGER type"),
         };
 
-        let sql = cell.text_column(buffer, 4)?;
+        let sql = cell.text_column_by_index(buffer, 4)?;
 
         Ok(SchemaMasterRecord {
             type_,

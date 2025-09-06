@@ -1,128 +1,99 @@
-use std::rc::Rc;
-use anyhow::bail;
-
-// Token types for SQL lexical analysis
-#[derive(Debug, Clone, PartialEq)]
-pub enum Token {
-    Select,
-    Count,
-    LParen,
-    Star,
-    RParen,
-    From,
-    Identifier(String),
-}
+use nom::{
+    branch::alt,
+    bytes::complete::tag_no_case,
+    character::complete::{char, multispace0, multispace1},
+    combinator::recognize,
+    multi::separated_list1,
+    sequence::tuple,
+    IResult,
+};
 
 // Statement AST types
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    SelectStmt { count_only: bool, table_name: String },
+    SelectStmt { 
+        count_only: bool, 
+        columns: Vec<String>,
+        table_name: String 
+    },
 }
 
-// Tokeniser
-fn tokenise(input: &str) -> anyhow::Result<Rc<[Token]>> {
-    let mut tokens = Vec::new();
-    let mut chars = input.trim().chars().peekable();
-
-    while let Some(&ch) = chars.peek() {
-        match ch {
-            ' ' | '\t' | '\n' | '\r' => {
-                chars.next();
-                continue;
-            }
-            '(' => {
-                tokens.push(Token::LParen);
-                chars.next();
-            }
-            ')' => {
-                tokens.push(Token::RParen);
-                chars.next();
-            }
-            '*' => {
-                tokens.push(Token::Star);
-                chars.next();
-            }
-            c if c.is_ascii_alphabetic() => {
-                let mut word = String::new();
-                while let Some(&ch) = chars.peek() {
-                    if ch.is_ascii_alphanumeric() || ch == '_' {
-                        word.push(chars.next().unwrap());
-                    } else {
-                        break;
-                    }
-                }
-
-                match word.to_uppercase().as_str() {
-                    "SELECT" => tokens.push(Token::Select),
-                    "COUNT" => tokens.push(Token::Count),
-                    "FROM" => tokens.push(Token::From),
-                    _ => tokens.push(Token::Identifier(word)),
-                }
-            }
-            _ => bail!("Unexpected character: '{}'", ch),
-        }
-    }
-
-    Ok(tokens.into())
-}
-
-// Parser
+/// Main entry point for parsing SQL statements
 pub fn parse_sql(query: &str) -> anyhow::Result<Statement> {
-    let tokens = tokenise(query)?;
-    parse_tokens(&tokens)
-}
-
-fn parse_tokens(tokens: &[Token]) -> anyhow::Result<Statement> {
-    if tokens.is_empty() {
-        bail!("Empty query");
-    }
-
-    match tokens[0] {
-        Token::Select => parse_select_statement(tokens),
-        _ => bail!("Only SELECT statements are supported"),
+    match select_statement(query.trim()) {
+        Ok((_, statement)) => Ok(statement),
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
+            anyhow::bail!("Failed to parse SQL statement: {:?}", e.code);
+        }
+        Err(nom::Err::Incomplete(_)) => {
+            anyhow::bail!("Incomplete SQL statement");
+        }
     }
 }
 
-fn parse_select_statement(tokens: &[Token]) -> anyhow::Result<Statement> {
-    let expected_pattern = [
-        Token::Select,
-        Token::Count,
-        Token::LParen,
-        Token::Star,
-        Token::RParen,
-        Token::From,
-    ];
+/// Parse SELECT statements
+fn select_statement(input: &str) -> IResult<&str, Statement> {
+    let (input, _) = tag_no_case("SELECT")(input)?;
+    let (input, _) = multispace1(input)?;
+    
+    alt((
+        select_count_statement,
+        select_columns_statement,
+    ))(input)
+}
 
-    if tokens.len() < expected_pattern.len() + 1 {
-        bail!("Invalid SELECT COUNT(*) syntax - missing tokens");
-    }
+/// Parse SELECT COUNT(*) FROM table
+fn select_count_statement(input: &str) -> IResult<&str, Statement> {
+    let (input, _) = tuple((
+        tag_no_case("COUNT"),
+        multispace0,
+        char('('),
+        multispace0,
+        char('*'),
+        multispace0,
+        char(')'),
+        multispace1,
+        tag_no_case("FROM"),
+        multispace1,
+    ))(input)?;
+    
+    let (input, table_name) = identifier(input)?;
+    
+    Ok((input, Statement::SelectStmt {
+        count_only: true,
+        columns: vec![],
+        table_name: table_name.to_string(),
+    }))
+}
 
-    for (idx, expected_token) in expected_pattern.iter().enumerate() {
-        if tokens[idx] != *expected_token {
-            bail!(
-                "Invalid SELECT COUNT(*) syntax at position {}: expected {:?}, got {:?}",
-                idx,
-                expected_token,
-                tokens[idx]
-            );
-        }
-    }
+/// Parse SELECT column1, column2 FROM table
+fn select_columns_statement(input: &str) -> IResult<&str, Statement> {
+    let (input, columns) = separated_list1(
+        tuple((multispace0, char(','), multispace0)),
+        identifier
+    )(input)?;
+    
+    let (input, _) = tuple((
+        multispace1,
+        tag_no_case("FROM"),
+        multispace1,
+    ))(input)?;
+    
+    let (input, table_name) = identifier(input)?;
+    
+    Ok((input, Statement::SelectStmt {
+        count_only: false,
+        columns: columns.into_iter().map(|s| s.to_string()).collect(),
+        table_name: table_name.to_string(),
+    }))
+}
 
-    if let Token::Identifier(table_name) = &tokens[expected_pattern.len()] {
-        if tokens.len() != expected_pattern.len() + 1 {
-            bail!("Extra tokens after table name");
-        }
-
-        Ok(Statement::SelectStmt {
-            count_only: true,
-            table_name: table_name.clone(),
-        })
-    } else {
-        bail!(
-            "Expected table name after FROM, got {:?}",
-            tokens[expected_pattern.len()]
-        );
-    }
+/// Parse SQL identifiers (table names, column names, etc.)
+fn identifier(input: &str) -> IResult<&str, &str> {
+    recognize(tuple((
+        nom::character::complete::satisfy(|c| c.is_ascii_alphabetic() || c == '_'),
+        nom::bytes::complete::take_while(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    )))(input)
 }
 
 
@@ -139,6 +110,7 @@ mod tests {
             parsed,
             Statement::SelectStmt {
                 count_only: true,
+                columns: vec![],
                 table_name: "apples".to_string()
             }
         );
@@ -152,6 +124,35 @@ mod tests {
             parsed,
             Statement::SelectStmt {
                 count_only: true,
+                columns: vec![],
+                table_name: "apples".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_select_single_column() {
+        let query = "SELECT name FROM apples";
+        let parsed = parse_sql(query).unwrap();
+        assert_eq!(
+            parsed,
+            Statement::SelectStmt {
+                count_only: false,
+                columns: vec!["name".to_string()],
+                table_name: "apples".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_select_multiple_columns() {
+        let query = "SELECT name, color FROM apples";
+        let parsed = parse_sql(query).unwrap();
+        assert_eq!(
+            parsed,
+            Statement::SelectStmt {
+                count_only: false,
+                columns: vec!["name".to_string(), "color".to_string()],
                 table_name: "apples".to_string()
             }
         );
